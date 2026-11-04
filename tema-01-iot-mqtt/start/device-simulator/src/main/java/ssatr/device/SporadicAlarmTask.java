@@ -1,5 +1,6 @@
 package ssatr.device;
 
+import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
 
 /**
@@ -17,9 +18,9 @@ public class SporadicAlarmTask implements Runnable {
 
     private final String deviceId;
     private final MqttConnection mqtt;
-    private final BlockingQueue<Double> alarmEvents;
+    private final BlockingQueue<AlarmEvent> alarmEvents;
 
-    public SporadicAlarmTask(String deviceId, MqttConnection mqtt, BlockingQueue<Double> alarmEvents) {
+    public SporadicAlarmTask(String deviceId, MqttConnection mqtt, BlockingQueue<AlarmEvent> alarmEvents) {
         this.deviceId = deviceId;
         this.mqtt = mqtt;
         this.alarmEvents = alarmEvents;
@@ -37,5 +38,33 @@ public class SporadicAlarmTask implements Runnable {
         //      citit din PeriodicTelemetryTask; alegeți și justificați în raport)
         //
         // Vezi exemplul exemple/01-taskuri/.../SporadicTaskExample.java
+
+        long lastRelease = -1;
+
+        try {
+            while (true) {
+                AlarmEvent e = alarmEvents.take();
+
+                long sinceLast = e.timestamp() - lastRelease;
+                if (lastRelease >= 0 && sinceLast < MIN_INTERARRIVAL_MS) {
+                    System.out.printf(Locale.US,
+                            "[sporadic] alarmă RESPINSĂ (temp = %.2f): au trecut doar %d ms (minim %d ms)%n",
+                            e.temperature(), sinceLast, MIN_INTERARRIVAL_MS);
+                    continue;
+                }
+                lastRelease = e.timestamp();
+
+                String message = deviceId + ";" + e.timestamp() + ";"
+                        + String.format(Locale.US, "%.2f", e.temperature()) + ";"
+                        + String.format(Locale.US, "%.2f", e.threshold());
+                mqtt.publish(Config.alarmTopic(deviceId), message);
+
+                long responseMs = System.currentTimeMillis() - e.timestamp();
+                System.out.printf(Locale.US, "[sporadic] ALARMĂ publicată: %.2f > %.2f  (R = %d ms)%n",
+                        e.temperature(), e.threshold(), responseMs);
+            }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

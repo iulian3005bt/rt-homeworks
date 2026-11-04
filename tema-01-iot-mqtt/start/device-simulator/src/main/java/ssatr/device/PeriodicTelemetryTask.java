@@ -1,6 +1,8 @@
 package ssatr.device;
 
+import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 /**
  * TASK PERIODIC, cu perioada T = periodMs: fiecare job citește senzorul și
@@ -15,14 +17,14 @@ public class PeriodicTelemetryTask implements Runnable {
     private final String deviceId;
     private final TemperatureSensor sensor;
     private final MqttConnection mqtt;
-    private final BlockingQueue<Double> alarmEvents;
+    private final BlockingQueue<AlarmEvent> alarmEvents;
 
     // volatile: sunt citite aici, dar modificate de taskul aperiodic (alt thread)
     private volatile long periodMs = 2000;
     private volatile double threshold = 28.0;
 
     public PeriodicTelemetryTask(String deviceId, TemperatureSensor sensor, MqttConnection mqtt,
-                                 BlockingQueue<Double> alarmEvents) {
+                                 BlockingQueue<AlarmEvent> alarmEvents) {
         this.deviceId = deviceId;
         this.sensor = sensor;
         this.mqtt = mqtt;
@@ -47,6 +49,43 @@ public class PeriodicTelemetryTask implements Runnable {
         //
         // periodMs se poate schimba în timpul rulării (comanda SET_INTERVAL),
         // deci citiți-l la fiecare job.
+
+        long nextRelease = System.nanoTime();
+        long k = 0;
+
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                long start = System.nanoTime();
+                double latenessMs = (start - nextRelease) / 1_000_000.0;
+
+                double t = sensor.read();
+                long now = System.currentTimeMillis();
+                String message = deviceId + ";" + now + ";" + String.format(Locale.US, "%.2f", t);
+                mqtt.publish(Config.telemetryTopic(deviceId), message);
+
+                double currentThreshold = threshold;
+                if (t > currentThreshold) {
+                    alarmEvents.offer(new AlarmEvent(t, currentThreshold, now));
+                }
+
+                long period = periodMs;
+                double computationMs = (System.nanoTime() - start) / 1_000_000.0;
+                System.out.printf(Locale.US, "[periodic] job #%d  L = %.3f ms  C = %.1f ms  T = %d ms  temp = %.2f%n",
+                        k, latenessMs, computationMs, period, t);
+
+                nextRelease += period * 1_000_000L;
+                long waitNs = nextRelease - System.nanoTime();
+                if (waitNs > 0) {
+                    TimeUnit.NANOSECONDS.sleep(waitNs);
+                } else if (-waitNs > period * 1_000_000L) {
+                    System.out.println("[periodic] depășire mare (overrun), resincronizez grila");
+                    nextRelease = System.nanoTime();
+                }
+                k++;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public void setPeriodMs(long periodMs) {
